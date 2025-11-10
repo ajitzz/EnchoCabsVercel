@@ -1,115 +1,155 @@
 // app/api/drivers/route.ts
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const runtime = "nodejs";           // Prisma must run on Node (not Edge)
+export const dynamic = "force-dynamic";    // prevent any static pre-render
+
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 
-// Server validation (source of truth)
-const schema = z.object({
-  name: z.string().min(2, "Enter full name"),
-  // Licence can be blank or >= 3 chars; accept 'licenceNumber' alias from clients
-  licenseNumber: z
-    .string()
-    .optional()
-    .transform((v) => (typeof v === "string" ? v.trim().toUpperCase() : ""))
-    .refine(
-      (s) => s.length === 0 || s.length >= 3,
-      "Licence number must be at least 3 characters (or leave it blank)"
-    ),
-  phone: z.string().min(1, "Phone is required"),
-  joinDate: z.string().min(1, "Join date is required"), // yyyy-mm-dd
-  profileImageUrl: z
-    .string()
-    .url("Enter a valid URL")
-    .optional()
-    .or(z.literal(""))
-    .optional(),
-});
+/* -------------------------- Helpers & Validation ------------------------- */
 
-// Normalize phones like: "+91 90000-00001" → "9000000001"
-function normalizePhone(raw: string) {
-  return (raw || "").replace(/\D/g, "");
+/** Strip everything but digits from a phone number. */
+function onlyDigits(s: string) {
+  return (s ?? "").replace(/\D/g, "");
 }
 
-export async function GET() {
-  const drivers = await prisma.driver.findMany({
-    orderBy: { createdAt: "desc" },
+/** Parse a YYYY-MM-DD string into a real Date (UTC-normalized at midnight). */
+function parseYMD(s: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const [y, m, d] = s.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1, 0, 0, 0));
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+/** Zod schema for POST /drivers body (server is source of truth). */
+const bodySchema = z
+  .object({
+    name: z.string().trim().min(2, "Enter full name"),
+
+    // Accept both licenseNumber | licenceNumber, allow blank or >= 3 chars
+    licenseNumber: z
+      .string()
+      .optional()
+      .transform((v) => (typeof v === "string" ? v.trim().toUpperCase() : ""))
+      .or(z.literal("").transform(() => ""))
+      .refine((s) => s.length === 0 || s.length >= 3, {
+        message: "Licence number must be at least 3 characters (or leave it blank)",
+      }),
+
+    phone: z
+      .string()
+      .trim()
+      .min(1, "Phone is required")
+      .transform((v) => onlyDigits(v))
+      .refine((digits) => digits.length >= 10, {
+        message: "Enter a valid phone (10+ digits)",
+      }),
+
+    // Expect "YYYY-MM-DD"
+    joinDate: z
+      .string()
+      .trim()
+      .refine((s) => parseYMD(s) !== null, { message: "Select a valid date" }),
+
+    profileImageUrl: z
+      .string()
+      .trim()
+      .url("Enter a valid URL")
+      .optional()
+      .or(z.literal("").transform(() => "")),
+  })
+  .transform((data) => {
+    // Normalize so DB is clean
+    return {
+      ...data,
+      licenseNumber: data.licenseNumber || null,
+      profileImageUrl: data.profileImageUrl || null,
+      joinDate: parseYMD(data.joinDate)!, // guaranteed by refine
+    };
   });
-  return NextResponse.json(drivers);
+
+/* --------------------------------- GET ---------------------------------- */
+/**
+ * List drivers. We prefer ordering by createdAt if it exists; otherwise
+ * we gracefully fall back to ordering by name. This avoids schema-mismatch
+ * build errors if a field isn't in the DB yet.
+ */
+export async function GET() {
+  try {
+    try {
+      const drivers = await prisma.driver.findMany({
+        orderBy: { createdAt: "desc" as const },
+      });
+      return NextResponse.json(drivers);
+    } catch {
+      // createdAt may not exist in older schemas -> fall back to name
+      const drivers = await prisma.driver.findMany({
+        orderBy: { name: "asc" as const },
+      });
+      return NextResponse.json(drivers);
+    }
+  } catch (e: any) {
+    const msg = String(e?.message ?? "Failed to fetch drivers");
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
 }
 
+/* --------------------------------- POST --------------------------------- */
+/**
+ * Create a driver record. Accepts both `licenseNumber` and `licenceNumber`
+ * in the incoming JSON body (we normalize it).
+ */
 export async function POST(req: Request) {
   try {
     const raw = await req.json();
 
-    // Accept both spellings
-    const body = {
-      ...raw,
-      licenseNumber: raw?.licenseNumber ?? raw?.licenceNumber ?? "",
-    };
+    // Accept both spellings from clients
+    if (raw && raw.licenceNumber != null && raw.licenseNumber == null) {
+      raw.licenseNumber = raw.licenceNumber;
+    }
 
-    const parsed = schema.safeParse(body);
+    const parsed = bodySchema.safeParse(raw);
     if (!parsed.success) {
       return NextResponse.json(
-        { error: "Validation failed", issues: parsed.error.flatten() },
+        {
+          error: "Validation failed",
+          issues: parsed.error.flatten(),
+        },
         { status: 422 }
       );
     }
 
     const data = parsed.data;
 
-    const phoneDigits = normalizePhone(data.phone);
-    if (phoneDigits.length < 10) {
-      return NextResponse.json(
-        {
-          error: "Validation failed",
-          issues: { fieldErrors: { phone: ["Enter a valid phone (10+ digits)"] } },
-        },
-        { status: 422 }
-      );
-    }
-
-    const joinDate = new Date(data.joinDate);
-    if (Number.isNaN(joinDate.getTime())) {
-      return NextResponse.json(
-        {
-          error: "Validation failed",
-          issues: { fieldErrors: { joinDate: ["Select a valid date"] } },
-        },
-        { status: 422 }
-      );
-    }
-
-    // empty string -> null in DB
-    const licence = data.licenseNumber && data.licenseNumber.length > 0 ? data.licenseNumber : null;
-    const imageUrl = data.profileImageUrl && data.profileImageUrl.length > 0 ? data.profileImageUrl : null;
-
     const created = await prisma.driver.create({
       data: {
         name: data.name.trim(),
-        licenseNumber: licence,
-        phone: phoneDigits,
-        joinDate,
-        profileImageUrl: imageUrl, // Avatar fallback on null
+        licenseNumber: data.licenseNumber,          // null or uppercase value
+        phone: data.phone,                          // digits-only
+        joinDate: data.joinDate,                    // Date (UTC midnight)
+        profileImageUrl: data.profileImageUrl,      // null or URL
       },
     });
 
     return NextResponse.json(created, { status: 201 });
   } catch (e: any) {
-    // If Prisma complains about unknown args in data, tell the dev to run a migration
-    const msg = String(e?.message ?? "");
-    if (/Unknown\s+argument\s+.+\s+in\s+data/i.test(msg)) {
+    const msg = String(e?.message ?? "Failed to create driver");
+
+    // Helpful hint if schema is out of sync with code
+    if (/Unknown\s+argument\s+.+\s+in\s+data/i.test(msg) || /Argument .+ missing/i.test(msg)) {
       return NextResponse.json(
         {
           error:
-            "Your Prisma model Driver is missing one or more fields used by the API. Add licenseNumber, phone, joinDate, profileImageUrl to schema.prisma and run `npx prisma migrate dev`.",
+            "Your Prisma model `Driver` is missing one or more fields used by this API. " +
+            "Make sure the model has: name (String), licenseNumber (String?), phone (String), " +
+            "joinDate (DateTime), profileImageUrl (String?). Then run `npx prisma migrate dev`.",
           details: msg,
           needsMigration: true,
         },
         { status: 500 }
       );
     }
-    return NextResponse.json({ error: msg || "Failed to create driver" }, { status: 400 });
+
+    return NextResponse.json({ error: msg }, { status: 400 });
   }
 }
