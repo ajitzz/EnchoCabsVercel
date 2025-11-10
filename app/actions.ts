@@ -1,9 +1,11 @@
 // app/actions.ts
 "use server";
 
-import { prisma } from "@/lib/prisma";
+
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
+import { getPrisma } from "@/lib/prisma";
+const prisma = getPrisma();
 
 /* ----------------------------- Date helpers ----------------------------- */
 // NOTE: helpers are NOT exported to satisfy "use server" rule.

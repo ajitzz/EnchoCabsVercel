@@ -1,4 +1,6 @@
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
+const prisma = getPrisma();
+
 
 async function main() {
   let d1 = await prisma.driver.findFirst({ where: { phone: "9000000001" } });

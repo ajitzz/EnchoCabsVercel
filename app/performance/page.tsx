@@ -3,8 +3,11 @@ export const dynamic = "force-dynamic";   // don't pre-render at build
 export const runtime = "nodejs";          // ensure Prisma runs on Node
 
 import { unstable_noStore as noStore } from "next/cache";
-import { prisma } from "@/lib/prisma";
+
 import PerformanceClient, { type DriverView } from "./performanceClient";
+import { getPrisma } from "@/lib/prisma";
+const prisma = getPrisma();
+
 
 /** Safe date -> "YYYY-MM-DD" (UTC normalized) */
 function toISODateOnly(d: Date | string | null | undefined): string {

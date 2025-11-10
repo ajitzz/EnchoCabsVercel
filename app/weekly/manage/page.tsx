@@ -1,7 +1,9 @@
-import { prisma } from "@/lib/prisma";
+
 import DeleteWeeklyTableClient from "./_components/DeleteWeeklyTableClient";
 
 export const dynamic = "force-dynamic";
+import { getPrisma } from "@/lib/prisma";
+const prisma = getPrisma();
 
 // Compatibility: support both prisma.weeklyEntry (new) and prisma.weeklyEarning (old)
 const Weekly: any = (prisma as any).weeklyEntry ?? (prisma as any).weeklyEarning;
