@@ -1,8 +1,11 @@
 // app/layout.tsx
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 import "./globals.css";
 import { ReactNode } from "react";
 import Link from "next/link";
 import {Button} from "@/components/ui/button";
+
 export const metadata = {
   title: "ENCHO • Drivers Performance & Weekly Entry",
   description: "Taxi Rental • Driver Performance",

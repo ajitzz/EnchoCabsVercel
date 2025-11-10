@@ -1,6 +1,11 @@
 // app/drivers/page.tsx
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+import { unstable_noStore as noStore } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import DriversClient, { type DriverListItem } from "./_components/DriverClient";
+
+
 
 function toISODateOnly(d?: Date | null) {
   if (!d) return null;
@@ -9,9 +14,12 @@ function toISODateOnly(d?: Date | null) {
 }
 
 export default async function DriversPage() {
+    noStore();
   const rows = await prisma.driver.findMany({
     orderBy: { createdAt: "desc" },
   });
+
+  
 
   const initialDrivers: DriverListItem[] = rows.map((d) => ({
     id: d.id,
