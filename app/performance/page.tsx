@@ -1,6 +1,13 @@
 // app/performance/page.tsx
+export const dynamic = "force-dynamic";   // don't pre-render at build
+export const runtime = "nodejs";          // Prisma-safe runtime
+
+import { unstable_noStore as noStore } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import PerformanceClient, { type DriverView } from "./performanceClient";
+
+
+
 
 function toISODateOnly(d: Date | string | null | undefined): string {
   if (!d) return "";
@@ -10,6 +17,7 @@ function toISODateOnly(d: Date | string | null | undefined): string {
 }
 
 export default async function PerformancePage() {
+  noStore();
   // Keep your existing filters exactly as they are (hidden/removed) if you had them.
   const drivers = await prisma.driver.findMany({
     include: {
