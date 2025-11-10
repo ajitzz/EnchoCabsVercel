@@ -1,19 +1,19 @@
 // app/api/drivers/route.ts
 export const runtime = "nodejs";           // Prisma must run on Node (not Edge)
-export const dynamic = "force-dynamic";    // prevent any static pre-render
+export const dynamic = "force-dynamic";    // never attempt static pre-render
 
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { getPrisma } from "@/lib/prisma";
 import { z } from "zod";
 
 /* -------------------------- Helpers & Validation ------------------------- */
 
-/** Strip everything but digits from a phone number. */
+/** Keep only digits from a phone number. */
 function onlyDigits(s: string) {
   return (s ?? "").replace(/\D/g, "");
 }
 
-/** Parse a YYYY-MM-DD string into a real Date (UTC-normalized at midnight). */
+/** Parse "YYYY-MM-DD" into a UTC Date at midnight; return null if invalid. */
 function parseYMD(s: string): Date | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
   const [y, m, d] = s.split("-").map(Number);
@@ -21,12 +21,12 @@ function parseYMD(s: string): Date | null {
   return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
-/** Zod schema for POST /drivers body (server is source of truth). */
+/** Server-side schema (source of truth). */
 const bodySchema = z
   .object({
     name: z.string().trim().min(2, "Enter full name"),
 
-    // Accept both licenseNumber | licenceNumber, allow blank or >= 3 chars
+    // Accept blank or >= 3 chars. We'll also accept `licenceNumber` alias.
     licenseNumber: z
       .string()
       .optional()
@@ -45,7 +45,7 @@ const bodySchema = z
         message: "Enter a valid phone (10+ digits)",
       }),
 
-    // Expect "YYYY-MM-DD"
+    // strictly "YYYY-MM-DD"
     joinDate: z
       .string()
       .trim()
@@ -58,52 +58,46 @@ const bodySchema = z
       .optional()
       .or(z.literal("").transform(() => "")),
   })
-  .transform((data) => {
-    // Normalize so DB is clean
-    return {
-      ...data,
-      licenseNumber: data.licenseNumber || null,
-      profileImageUrl: data.profileImageUrl || null,
-      joinDate: parseYMD(data.joinDate)!, // guaranteed by refine
-    };
-  });
+  .transform((data) => ({
+    ...data,
+    licenseNumber: data.licenseNumber || null,
+    profileImageUrl: data.profileImageUrl || null,
+    joinDate: parseYMD(data.joinDate)!, // guaranteed by refine
+  }));
 
 /* --------------------------------- GET ---------------------------------- */
-/**
- * List drivers. We prefer ordering by createdAt if it exists; otherwise
- * we gracefully fall back to ordering by name. This avoids schema-mismatch
- * build errors if a field isn't in the DB yet.
- */
+/** List drivers. Prefer createdAt desc; fall back to name asc if field missing. */
 export async function GET() {
+  const prisma = getPrisma();
   try {
     try {
       const drivers = await prisma.driver.findMany({
         orderBy: { createdAt: "desc" as const },
       });
-      return NextResponse.json(drivers);
+      return NextResponse.json(drivers, { headers: { "Cache-Control": "no-store" } });
     } catch {
-      // createdAt may not exist in older schemas -> fall back to name
+      // Some schemas may not have createdAt
       const drivers = await prisma.driver.findMany({
         orderBy: { name: "asc" as const },
       });
-      return NextResponse.json(drivers);
+      return NextResponse.json(drivers, { headers: { "Cache-Control": "no-store" } });
     }
   } catch (e: any) {
-    const msg = String(e?.message ?? "Failed to fetch drivers");
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return NextResponse.json(
+      { error: String(e?.message ?? "Failed to fetch drivers") },
+      { status: 500 }
+    );
   }
 }
 
 /* --------------------------------- POST --------------------------------- */
-/**
- * Create a driver record. Accepts both `licenseNumber` and `licenceNumber`
- * in the incoming JSON body (we normalize it).
- */
+/** Create driver; accepts `licenseNumber` or `licenceNumber` from the client. */
 export async function POST(req: Request) {
+  const prisma = getPrisma();
   try {
     const raw = await req.json();
 
-    // Accept both spellings from clients
+    // Accept both spellings
     if (raw && raw.licenceNumber != null && raw.licenseNumber == null) {
       raw.licenseNumber = raw.licenceNumber;
     }
@@ -111,10 +105,7 @@ export async function POST(req: Request) {
     const parsed = bodySchema.safeParse(raw);
     if (!parsed.success) {
       return NextResponse.json(
-        {
-          error: "Validation failed",
-          issues: parsed.error.flatten(),
-        },
+        { error: "Validation failed", issues: parsed.error.flatten() },
         { status: 422 }
       );
     }
@@ -124,10 +115,10 @@ export async function POST(req: Request) {
     const created = await prisma.driver.create({
       data: {
         name: data.name.trim(),
-        licenseNumber: data.licenseNumber,          // null or uppercase value
-        phone: data.phone,                          // digits-only
-        joinDate: data.joinDate,                    // Date (UTC midnight)
-        profileImageUrl: data.profileImageUrl,      // null or URL
+        licenseNumber: data.licenseNumber,       // null or uppercase license
+        phone: data.phone,                       // digits-only
+        joinDate: data.joinDate,                 // Date (UTC midnight)
+        profileImageUrl: data.profileImageUrl,   // null or URL
       },
     });
 
@@ -135,13 +126,13 @@ export async function POST(req: Request) {
   } catch (e: any) {
     const msg = String(e?.message ?? "Failed to create driver");
 
-    // Helpful hint if schema is out of sync with code
+    // Helpful hint if schema is out-of-sync
     if (/Unknown\s+argument\s+.+\s+in\s+data/i.test(msg) || /Argument .+ missing/i.test(msg)) {
       return NextResponse.json(
         {
           error:
             "Your Prisma model `Driver` is missing one or more fields used by this API. " +
-            "Make sure the model has: name (String), licenseNumber (String?), phone (String), " +
+            "Ensure the model has: name (String), licenseNumber (String?), phone (String), " +
             "joinDate (DateTime), profileImageUrl (String?). Then run `npx prisma migrate dev`.",
           details: msg,
           needsMigration: true,
